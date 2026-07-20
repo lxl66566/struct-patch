@@ -2,7 +2,6 @@ extern crate proc_macro;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens};
 use std::str::FromStr;
-#[cfg(not(feature = "op"))]
 use syn::spanned::Spanned;
 use syn::{parenthesized, DeriveInput, Lit, LitStr, Result, Type};
 
@@ -18,6 +17,14 @@ const ADD: &str = "add";
 const NESTING: &str = "nesting";
 const EMPTY_VALUE: &str = "empty_value";
 const SKIP_WRAP: &str = "skip_wrap";
+#[cfg(feature = "list")]
+const LIST_PATCH: &str = "list_patch";
+#[cfg(feature = "list")]
+const LIST_ID: &str = "id";
+#[cfg(feature = "list")]
+const LIST_ID_TYPE: &str = "id_type";
+#[cfg(feature = "list")]
+const LIST_PATCH_TYPE: &str = "patch_type";
 
 pub(crate) struct Patch {
     visibility: syn::Visibility,
@@ -50,6 +57,20 @@ impl SpecialAttr {
     }
 }
 
+/// Parsed info for a `#[patch(list_patch(...))]` field.
+#[cfg(feature = "list")]
+struct ListPatchInfo {
+    /// The element type `T` extracted from `Vec<T>`.
+    element_type: Type,
+    /// The id type used for addressing elements.
+    id_type: Type,
+    /// The closure `|&T| -> ID`.
+    id_fn: syn::Expr,
+    /// Optional override for the patch type of the element. Defaults to
+    /// `{T}Patch`.
+    patch_type: Option<Type>,
+}
+
 struct Field {
     ident: Option<Ident>,
     ty: Type,
@@ -60,6 +81,21 @@ struct Field {
     #[cfg(feature = "nesting")]
     nesting: bool,
     special_attr: SpecialAttr,
+    #[cfg(feature = "list")]
+    list_patch: Option<ListPatchInfo>,
+}
+
+impl Field {
+    /// Whether this field is a list-patch field. Returns `false` when the
+    /// `list` feature is disabled.
+    #[cfg(feature = "list")]
+    fn is_list_patch(&self) -> bool {
+        self.list_patch.is_some()
+    }
+    #[cfg(not(feature = "list"))]
+    fn is_list_patch(&self) -> bool {
+        false
+    }
 }
 
 impl Patch {
@@ -83,29 +119,34 @@ impl Patch {
         #[cfg(not(feature = "nesting"))]
         let field_names = fields
             .iter()
-            .filter(|f| f.special_attr.is_empty())
+            .filter(|f| f.special_attr.is_empty() && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(not(feature = "nesting"))]
         let field_names_by_empty_value = fields
             .iter()
-            .filter(|f| matches!(f.special_attr, SpecialAttr::EmptyValue(_)))
+            .filter(|f| matches!(f.special_attr, SpecialAttr::EmptyValue(_)) && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let field_names = fields
             .iter()
-            .filter(|f| !f.nesting && f.special_attr.is_empty())
+            .filter(|f| !f.nesting && f.special_attr.is_empty() && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let field_names_by_empty_value = fields
             .iter()
-            .filter(|f| !f.nesting && matches!(f.special_attr, SpecialAttr::EmptyValue(_)))
+            .filter(|f| {
+                !f.nesting
+                    && matches!(f.special_attr, SpecialAttr::EmptyValue(_))
+                    && !f.is_list_patch()
+            })
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         let field_name_empty_values = fields
             .iter()
+            .filter(|f| !f.is_list_patch())
             .filter_map(|f| f.special_attr.empty_value())
             .collect::<Vec<_>>();
 
@@ -114,13 +155,15 @@ impl Patch {
         #[cfg(not(feature = "nesting"))]
         let skip_wrap_field_names = fields
             .iter()
-            .filter(|f| matches!(f.special_attr, SpecialAttr::SkipWrap))
+            .filter(|f| matches!(f.special_attr, SpecialAttr::SkipWrap) && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let skip_wrap_field_names = fields
             .iter()
-            .filter(|f| matches!(f.special_attr, SpecialAttr::SkipWrap) && !f.nesting)
+            .filter(|f| {
+                matches!(f.special_attr, SpecialAttr::SkipWrap) && !f.nesting && !f.is_list_patch()
+            })
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
 
@@ -128,30 +171,39 @@ impl Patch {
         #[cfg(not(feature = "nesting"))]
         let renamed_field_names = fields
             .iter()
-            .filter(|f| f.retyped && f.special_attr.is_empty())
+            .filter(|f| f.retyped && f.special_attr.is_empty() && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(not(feature = "nesting"))]
         let renamed_field_names_by_empty_value = fields
             .iter()
-            .filter(|f| f.retyped && matches!(f.special_attr, SpecialAttr::EmptyValue(_)))
+            .filter(|f| {
+                f.retyped
+                    && matches!(f.special_attr, SpecialAttr::EmptyValue(_))
+                    && !f.is_list_patch()
+            })
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let renamed_field_names = fields
             .iter()
-            .filter(|f| f.retyped && !f.nesting && f.special_attr.is_empty())
+            .filter(|f| f.retyped && !f.nesting && f.special_attr.is_empty() && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let renamed_field_names_by_empty_value = fields
             .iter()
-            .filter(|f| f.retyped && !f.nesting && matches!(f.special_attr, SpecialAttr::EmptyValue(_)))
+            .filter(|f| {
+                f.retyped
+                    && !f.nesting
+                    && matches!(f.special_attr, SpecialAttr::EmptyValue(_))
+                    && !f.is_list_patch()
+            })
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         let renamed_field_name_empty_values = fields
             .iter()
-            .filter(|f| f.retyped)
+            .filter(|f| f.retyped && !f.is_list_patch())
             .filter_map(|f| f.special_attr.empty_value())
             .collect::<Vec<_>>();
 
@@ -159,37 +211,46 @@ impl Patch {
         #[cfg(not(feature = "nesting"))]
         let original_field_names = fields
             .iter()
-            .filter(|f| !f.retyped && f.special_attr.is_empty())
+            .filter(|f| !f.retyped && f.special_attr.is_empty() && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(not(feature = "nesting"))]
         let original_field_names_by_empty_value = fields
             .iter()
-            .filter(|f| !f.retyped && matches!(f.special_attr, SpecialAttr::EmptyValue(_)))
+            .filter(|f| {
+                !f.retyped
+                    && matches!(f.special_attr, SpecialAttr::EmptyValue(_))
+                    && !f.is_list_patch()
+            })
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let original_field_names = fields
             .iter()
-            .filter(|f| !f.retyped && !f.nesting && f.special_attr.is_empty())
+            .filter(|f| !f.retyped && !f.nesting && f.special_attr.is_empty() && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let original_field_names_by_empty_value = fields
             .iter()
-            .filter(|f| !f.retyped && !f.nesting && matches!(f.special_attr, SpecialAttr::EmptyValue(_)))
+            .filter(|f| {
+                !f.retyped
+                    && !f.nesting
+                    && matches!(f.special_attr, SpecialAttr::EmptyValue(_))
+                    && !f.is_list_patch()
+            })
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(not(feature = "nesting"))]
         let original_field_name_empty_values = fields
             .iter()
-            .filter(|f| !f.retyped)
+            .filter(|f| !f.retyped && !f.is_list_patch())
             .filter_map(|f| f.special_attr.empty_value())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let original_field_name_empty_values = fields
             .iter()
-            .filter(|f| !f.retyped && !f.nesting)
+            .filter(|f| !f.retyped && !f.nesting && !f.is_list_patch())
             .filter_map(|f| f.special_attr.empty_value())
             .collect::<Vec<_>>();
 
@@ -202,14 +263,68 @@ impl Patch {
         #[cfg(feature = "nesting")]
         let nesting_field_names = fields
             .iter()
-            .filter(|f| f.nesting)
+            .filter(|f| f.nesting && !f.is_list_patch())
             .map(|f| f.ident.as_ref())
             .collect::<Vec<_>>();
         #[cfg(feature = "nesting")]
         let nesting_field_types = fields
             .iter()
-            .filter(|f| f.nesting)
+            .filter(|f| f.nesting && !f.is_list_patch())
             .map(|f| f.ty.clone())
+            .collect::<Vec<_>>();
+
+        // List-patch fields
+        #[cfg(not(feature = "list"))]
+        let list_patch_field_names: Vec<Option<Ident>> = Vec::new();
+        #[cfg(not(feature = "list"))]
+        let list_patch_id_fns: Vec<syn::Expr> = Vec::new();
+        #[cfg(not(feature = "list"))]
+        let list_patch_id_types: Vec<Type> = Vec::new();
+        #[cfg(not(feature = "list"))]
+        let list_patch_element_types: Vec<Type> = Vec::new();
+        #[cfg(not(feature = "list"))]
+        let list_patch_patch_types: Vec<TokenStream> = Vec::new();
+
+        #[cfg(feature = "list")]
+        let list_patch_field_names = fields
+            .iter()
+            .filter(|f| f.list_patch.is_some())
+            .map(|f| f.ident.clone())
+            .collect::<Vec<_>>();
+        #[cfg(feature = "list")]
+        let list_patch_id_fns = fields
+            .iter()
+            .filter(|f| f.list_patch.is_some())
+            .map(|f| f.list_patch.as_ref().unwrap().id_fn.clone())
+            .collect::<Vec<_>>();
+        #[cfg(feature = "list")]
+        let list_patch_id_types = fields
+            .iter()
+            .filter(|f| f.list_patch.is_some())
+            .map(|f| f.list_patch.as_ref().unwrap().id_type.clone())
+            .collect::<Vec<_>>();
+        #[cfg(feature = "list")]
+        let list_patch_element_types = fields
+            .iter()
+            .filter(|f| f.list_patch.is_some())
+            .map(|f| f.list_patch.as_ref().unwrap().element_type.clone())
+            .collect::<Vec<_>>();
+        #[cfg(feature = "list")]
+        let list_patch_patch_types = fields
+            .iter()
+            .filter(|f| f.list_patch.is_some())
+            .map(|f| {
+                let info = f.list_patch.as_ref().unwrap();
+                match &info.patch_type {
+                    Some(t) => t.to_token_stream(),
+                    None => {
+                        let s = info.element_type.to_token_stream().to_string();
+                        let ident =
+                            Ident::new(&format!("{}Patch", s.replace(' ', "")), Span::call_site());
+                        quote! { #ident }
+                    }
+                }
+            })
             .collect::<Vec<_>>();
 
         let mapped_attributes = attributes
@@ -254,6 +369,11 @@ impl Patch {
                             return false
                         }
                      )*
+                    #(
+                        if !self.#list_patch_field_names.is_empty() {
+                            return false
+                        }
+                    )*
                     true
                 }
             }
@@ -299,6 +419,13 @@ impl Patch {
                         )*
                         #(
                             #nesting_field_names: other.#nesting_field_names.merge(self.#nesting_field_names),
+                        )*
+                        #(
+                            #list_patch_field_names: {
+                                let mut v = self.#list_patch_field_names;
+                                v.extend(other.#list_patch_field_names);
+                                v
+                            },
                         )*
                     }
                 }
@@ -410,6 +537,13 @@ impl Patch {
                         #(
                             #nesting_field_names: self.#nesting_field_names + rhs.#nesting_field_names,
                         )*
+                        #(
+                            #list_patch_field_names: {
+                                let mut v = self.#list_patch_field_names;
+                                v.extend(rhs.#list_patch_field_names);
+                                v
+                            },
+                        )*
                     }
                 }
             }
@@ -499,6 +633,13 @@ impl Patch {
                         #(
                             #nesting_field_names: self.#nesting_field_names + rhs.#nesting_field_names,
                         )*
+                        #(
+                            #list_patch_field_names: {
+                                let mut v = self.#list_patch_field_names;
+                                v.extend(rhs.#list_patch_field_names);
+                                v
+                            },
+                        )*
                     }
                 }
             }
@@ -539,6 +680,17 @@ impl Patch {
                     #(
                         self.#nesting_field_names.apply(patch.#nesting_field_names);
                     )*
+                    #(
+                        {
+                            let __id_fn: &dyn Fn(&#list_patch_element_types) -> #list_patch_id_types =
+                                &(#list_patch_id_fns);
+                            struct_patch::list::ListPatchApply::apply_list_patch_ops(
+                                &mut self.#list_patch_field_names,
+                                patch.#list_patch_field_names,
+                                __id_fn,
+                            );
+                        }
+                    )*
                 }
 
                 fn into_patch(self) -> #name #generics {
@@ -560,6 +712,12 @@ impl Patch {
                         )*
                         #(
                             #nesting_field_names: self.#nesting_field_names.into_patch(),
+                        )*
+                        #(
+                            #list_patch_field_names: self.#list_patch_field_names
+                                .into_iter()
+                                .map(|__v| struct_patch::list::ListPatchOp::append(__v))
+                                .collect::<Vec<struct_patch::list::ListPatchOp<#list_patch_element_types, #list_patch_patch_types, #list_patch_id_types>>>(),
                         )*
                     }
                 }
@@ -609,6 +767,31 @@ impl Patch {
                         #(
                             #nesting_field_names: self.#nesting_field_names.into_patch_by_diff(previous_struct.#nesting_field_names),
                         )*
+                        #(
+                            #list_patch_field_names: {
+                                let __id_fn: &dyn Fn(&#list_patch_element_types) -> #list_patch_id_types =
+                                    &(#list_patch_id_fns);
+                                let mut __prev: Vec<#list_patch_element_types> =
+                                    previous_struct.#list_patch_field_names.into_iter().collect();
+                                let mut __ops: Vec<struct_patch::list::ListPatchOp<#list_patch_element_types, #list_patch_patch_types, #list_patch_id_types>> = Vec::new();
+                                for __x in self.#list_patch_field_names.into_iter() {
+                                    let __id_x = __id_fn(&__x);
+                                    if let Some(__idx) = __prev.iter().position(|__p| __id_fn(__p) == __id_x) {
+                                        let __prev_x = __prev.remove(__idx);
+                                        __ops.push(struct_patch::list::ListPatchOp::modify(
+                                            __id_x,
+                                            __x.into_patch_by_diff(__prev_x),
+                                        ));
+                                    } else {
+                                        __ops.push(struct_patch::list::ListPatchOp::append(__x));
+                                    }
+                                }
+                                for __p in __prev.into_iter() {
+                                    __ops.push(struct_patch::list::ListPatchOp::delete(__id_fn(&__p)));
+                                }
+                                __ops
+                            },
+                        )*
                     }
                 }
 
@@ -625,6 +808,9 @@ impl Patch {
                         )*
                         #(
                             #nesting_field_names: #nesting_field_types::new_empty_patch(),
+                        )*
+                        #(
+                            #list_patch_field_names: Vec::new(),
                         )*
                     }
                 }
@@ -741,6 +927,8 @@ impl Field {
             #[cfg(feature = "nesting")]
             nesting,
             special_attr,
+            #[cfg(feature = "list")]
+            list_patch,
             ..
         } = self;
 
@@ -752,6 +940,32 @@ impl Field {
                 }
             })
             .collect::<Vec<_>>();
+
+        #[cfg(feature = "list")]
+        if let Some(info) = list_patch {
+            let elem = &info.element_type;
+            let id_ty = &info.id_type;
+            let patch_ty = match &info.patch_type {
+                Some(t) => t.to_token_stream(),
+                None => {
+                    let s = elem.to_token_stream().to_string();
+                    let patch_ident =
+                        Ident::new(&format!("{}Patch", s.replace(' ', "")), Span::call_site());
+                    quote! { #patch_ident }
+                }
+            };
+            return match ident {
+                Some(ident) => Ok(quote! {
+                    #(#attributes)*
+                    pub #ident: Vec<struct_patch::list::ListPatchOp<#elem, #patch_ty, #id_ty>>,
+                }),
+                None => Ok(quote! {
+                    #(#attributes)*
+                    pub Vec<struct_patch::list::ListPatchOp<#elem, #patch_ty, #id_ty>>,
+                }),
+            };
+        }
+
         match ident {
             #[cfg(not(feature = "nesting"))]
             Some(ident) => {
@@ -847,6 +1061,8 @@ impl Field {
         let mut addable = Addable::Disable;
         #[cfg(feature = "nesting")]
         let mut nesting = false;
+        #[cfg(feature = "list")]
+        let mut list_patch: Option<ListPatchInfo> = None;
 
         for attr in attrs {
             if attr.path().to_string().as_str() != PATCH {
@@ -939,6 +1155,84 @@ impl Field {
                         }
                         special_attr = SpecialAttr::SkipWrap;
                     }
+                    #[cfg(feature = "list")]
+                    LIST_PATCH => {
+                        // #[patch(list_patch(id = |x| ..., id_type = T, patch_type = ...))]
+                        if list_patch.is_some() {
+                            return Err(meta.error(
+                                "`list_patch` can't be defined more than once on the same field",
+                            ));
+                        }
+                        let content;
+                        parenthesized!(content in meta.input);
+                        let metas: syn::punctuated::Punctuated<syn::Meta, syn::Token![,]> =
+                            syn::punctuated::Punctuated::parse_terminated(&content)?;
+                        let mut id_fn: Option<syn::Expr> = None;
+                        let mut id_type: Option<Type> = None;
+                        let mut patch_type: Option<Type> = None;
+                        for m in metas {
+                            let syn::Meta::NameValue(nv) = m else {
+                                return Err(syn::Error::new(
+                                    ident.span(),
+                                    "`list_patch` only supports `key = value` items",
+                                ));
+                            };
+                            let m_path = nv.path.to_string();
+                            match m_path.as_str() {
+                                LIST_ID => {
+                                    id_fn = Some(nv.value);
+                                }
+                                LIST_ID_TYPE => {
+                                    let t: Type = syn::parse2(nv.value.to_token_stream())?;
+                                    id_type = Some(t);
+                                }
+                                LIST_PATCH_TYPE => {
+                                    let t: Type = syn::parse2(nv.value.to_token_stream())?;
+                                    patch_type = Some(t);
+                                }
+                                _ => {
+                                    return Err(syn::Error::new(
+                                        nv.path.span(),
+                                        format_args!(
+                                            "unknown `list_patch` attribute `{}`",
+                                            m_path.replace(' ', "")
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        let id_fn = id_fn.ok_or_else(|| {
+                            syn::Error::new(
+                                ident.span(),
+                                "`list_patch` requires `id = <closure>`",
+                            )
+                        })?;
+                        let id_type = id_type.ok_or_else(|| {
+                            syn::Error::new(
+                                ident.span(),
+                                "`list_patch` requires `id_type = <type>`",
+                            )
+                        })?;
+                        let element_type = extract_vec_element_type(&ty).ok_or_else(|| {
+                            syn::Error::new(
+                                ty.span(),
+                                "`list_patch` requires the field to be `Vec<T>`",
+                            )
+                        })?;
+                        list_patch = Some(ListPatchInfo {
+                            element_type,
+                            id_type,
+                            id_fn,
+                            patch_type,
+                        });
+                    }
+                    #[cfg(not(feature = "list"))]
+                    LIST_PATCH => {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "`list_patch` needs the `list` feature",
+                        ));
+                    }
                     _ => {
                         return Err(meta.error(format_args!(
                             "unknown patch field attribute `{}`",
@@ -963,6 +1257,8 @@ impl Field {
             #[cfg(feature = "nesting")]
             nesting,
             special_attr,
+            #[cfg(feature = "list")]
+            list_patch,
         }))
     }
 }
@@ -974,6 +1270,29 @@ trait ToStr {
 impl ToStr for syn::Path {
     fn to_string(&self) -> String {
         self.to_token_stream().to_string()
+    }
+}
+
+/// Extract the element type `T` from a `Vec<T>` field type. Returns `None`
+/// for anything else.
+#[cfg(feature = "list")]
+fn extract_vec_element_type(ty: &Type) -> Option<Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let last_segment = type_path.path.segments.last()?;
+    if last_segment.ident != "Vec" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments else {
+        return None;
+    };
+    if args.args.len() != 1 {
+        return None;
+    }
+    match &args.args[0] {
+        syn::GenericArgument::Type(t) => Some(t.clone()),
+        _ => None,
     }
 }
 
@@ -1015,7 +1334,11 @@ mod tests {
                     retyped: true,
                     #[cfg(feature = "op")]
                     addable: Addable::Disable,
+                    #[cfg(feature = "nesting")]
+                    nesting: false,
                     special_attr: SpecialAttr::None,
+                    #[cfg(feature = "list")]
+                    list_patch: None,
                 },
                 Field {
                     ident: Some(syn::Ident::new("field3", Span::call_site())),
@@ -1024,7 +1347,14 @@ mod tests {
                     retyped: false,
                     #[cfg(feature = "op")]
                     addable: Addable::Disable,
-                    special_attr: SpecialAttr::EmptyValue(Lit::Bool(syn::LitBool::new(false, Span::call_site()))),
+                    #[cfg(feature = "nesting")]
+                    nesting: false,
+                    special_attr: SpecialAttr::EmptyValue(Lit::Bool(syn::LitBool::new(
+                        false,
+                        Span::call_site(),
+                    ))),
+                    #[cfg(feature = "list")]
+                    list_patch: None,
                 },
             ],
         };

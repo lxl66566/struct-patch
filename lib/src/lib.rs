@@ -89,9 +89,14 @@ pub use struct_patch_derive::Patch;
 #[doc(hidden)]
 pub use struct_patch_derive::Substrate;
 pub mod r#box;
+#[cfg(feature = "list")]
+pub mod list;
 pub mod option;
 pub mod traits;
 pub use traits::*;
+
+#[cfg(all(test, feature = "list", feature = "serde"))]
+mod list_tests;
 
 #[cfg(test)]
 mod tests {

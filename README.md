@@ -189,6 +189,61 @@ item.apply(ItemPatch { tags: Some(vec![]) });
 assert_eq!(item.tags, Some(vec![]));
 ```
 
+#### Case 5 - Fine-grained patch on a list
+With the `list` feature, a `Vec<T>` field can be patched element-by-element
+with `#[patch(list_patch(...))]`. You provide a closure that computes a unique
+id for each element, and the generated patch field becomes a
+`Vec<ListPatchOp<T, TPatch, ID>>`, where each op is one of `Prepend`,
+`Append`, `Insert`, `Modify` (by id) or `Delete` (by id). Because `Modify`
+carries the element's own patch type, patching stays deeply recursive.
+
+```rust
+use struct_patch::Patch;
+use struct_patch::list::ListPatchOp;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Default, Debug, PartialEq, Patch, Serialize, Deserialize)]
+#[patch(attribute(derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)))]
+struct Inner {
+    id: u32,
+    value: u32,
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Patch, Serialize, Deserialize)]
+#[patch(attribute(derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)))]
+struct Config {
+    #[patch(list_patch(id = |x| x.id, id_type = u32))]
+    items: Vec<Inner>,
+}
+
+let mut config = Config {
+    items: vec![
+        Inner { id: 1, value: 1 },
+        Inner { id: 2, value: 2 },
+    ],
+};
+
+// Ops can also be built from JSON, each one shaped like `{"op":"...", ...}`
+let data = r#"[
+    {"op":"modify","id":1,"value":{"value":10}},
+    {"op":"delete","id":2},
+    {"op":"append","value":{"id":3,"value":3}}
+]"#;
+let ops: Vec<ListPatchOp<Inner, InnerPatch, u32>> = serde_json::from_str(data).unwrap();
+
+config.apply(ConfigPatch { items: ops });
+assert_eq!(
+    config.items,
+    vec![Inner { id: 1, value: 10 }, Inner { id: 3, value: 3 }]
+);
+```
+
+`into_patch` serializes an existing instance as a series of `Append` ops, and
+`into_patch_by_diff` diffs two instances by element id, emitting `Modify`,
+`Append` and `Delete` ops (a matched element always gets a `Modify`, carrying
+an empty sub-patch when unchanged). Ops with unknown ids are silently ignored
+when applied.
+
 ## Attributes
 
 You can customize the generated structs by defining `#[patch(...)]`, `#[filler(...)]`, `#[complex(...)]` (catalyst feature), or `#[catalyst(...)]` (catalyst feature) attributes on the original struct or its fields.
@@ -216,6 +271,7 @@ Two attribute namespaces are provided for the catalyst feature because we need t
 - `#[patch(empty_value = ...)]`: define a value as empty, so the corresponding field of the patch will not be wrapped by `Option`, and the patch is applied when the field differs from the empty value.
 - `#[patch(skip_wrap)]`: keep the field type as-is in the patch struct (no extra `Option` wrapping). Useful when the field is already `Option<...>` (for example `Option<Vec<_>>`) and you do not want a double-`Option` in the patch. With `skip_wrap`, `None` in the patch means "no change" and `Some(v)` sets the field to `Some(v)` (including `Some(vec![])` to clear the vector). Cannot be combined with `empty_value`.
 - `#[patch(nesting)]`: treat the field as a nested patchable struct. The inner struct must also derive `Patch`. Requires the `nesting` feature.
+- `#[patch(list_patch(id = |x| ..., id_type = ..., patch_type = ...))]`: patch a `Vec<T>` field element-by-element with `ListPatchOp`s (`Prepend`/`Append`/`Insert`/`Modify`/`Delete`). `id` is a closure computing an element's id, `id_type` is the id type, and `patch_type` optionally overrides the element patch type (defaults to `<T>Patch`). Requires the `list` feature.
 - `#[patch(addable)]`: allow conflicting patches to add their values together with the `+` operator instead of panicking. Requires the `op` feature.
 - `#[patch(add = fn)]`: like `addable`, but use the specified function to combine values. Requires the `op` feature.
 - `#[filler(extendable)]`: use the field as an extendable collection for the filler. The field type needs to implement `Default`, `Extend`, `IntoIterator`, and have an `is_empty` method.
@@ -258,6 +314,7 @@ This crate includes the following optional features:
   - `none_as_default` *(optional)*: `T` needs to implement `Default`. When patching on `None`, it patches on a default instance. Mutually exclusive with `keep_none`.
   - `keep_none` *(optional)*: when patching on `None`, it stays `None`. Mutually exclusive with `none_as_default`.
 - `nesting` *(optional)*: allows a field to use `Patch` derive with the `#[patch(nesting)]` attribute.
+- `list` *(optional)*: allows a `Vec<T>` field to use `Patch` derive with the `#[patch(list_patch(...))]` attribute for fine-grained, id-addressed list patching (see Case 5). Implies `alloc`. With the `serde` feature, each op serializes as `{"op":"...","value":{...}}` (e.g. `{"op":"modify","id":1,"value":{...}}`).
 - `catalyst` *(optional)*: enables the `Substrate`, `Catalyst`, and `Complex` derive macros for extending a struct with fields from another crate.
 - `unsafe` *(optional)*: uses `ManuallyDrop` + `ptr::read` / `MaybeUninit` + `ptr::write` in the generated `bind`, `decouple`, `__substrate_new`, and `__substrate_unpack` to avoid memory moves. Only meaningful with the `catalyst` feature.
 
