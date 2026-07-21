@@ -115,8 +115,20 @@ pub trait Patch<P> {
     /// Returns a patch that when applied turns any struct of the same type into `Self`
     fn into_patch(self) -> P;
 
-    /// Returns a patch that when applied turns `previous_struct` into `Self`
-    fn into_patch_by_diff(self, previous_struct: Self) -> P;
+    /// Returns a patch that when applied turns `previous_struct` into `Self`.
+    ///
+    /// The derive generates an override that diffs field-by-field, which
+    /// requires `Self: PartialEq`. Types whose fields cannot derive
+    /// `PartialEq` (e.g. they contain `RefCell`, locks, or opaque runtime
+    /// caches) can opt out via `#[patch(no_diff)]`; the derive then skips the
+    /// override and this default runs instead, falling back to a full patch.
+    fn into_patch_by_diff(self, previous_struct: Self) -> P
+    where
+        Self: Sized,
+    {
+        let _ = previous_struct;
+        self.into_patch()
+    }
 
     /// Get an empty patch instance
     fn new_empty_patch() -> P;

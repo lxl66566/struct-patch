@@ -17,6 +17,12 @@ const ADD: &str = "add";
 const NESTING: &str = "nesting";
 const EMPTY_VALUE: &str = "empty_value";
 const SKIP_WRAP: &str = "skip_wrap";
+/// Container attribute: skip generating `into_patch_by_diff`. Useful for
+/// structs whose fields cannot derive `PartialEq` (e.g. they contain
+/// `RefCell`, locks, or opaque runtime caches). The trait's default
+/// `into_patch_by_diff` then kicks in, which just falls back to
+/// `into_patch()`.
+const NO_DIFF: &str = "no_diff";
 #[cfg(feature = "list")]
 const LIST_PATCH: &str = "list_patch";
 #[cfg(feature = "list")]
@@ -33,6 +39,10 @@ pub(crate) struct Patch {
     generics: syn::Generics,
     attributes: Vec<TokenStream>,
     fields: Vec<Field>,
+    /// Set by `#[patch(no_diff)]`: suppress generation of the
+    /// `into_patch_by_diff` override so the trait's default impl runs,
+    /// avoiding the `PartialEq` bound on every field.
+    no_diff: bool,
 }
 
 enum SpecialAttr {
@@ -108,6 +118,7 @@ impl Patch {
             generics,
             attributes,
             fields,
+            no_diff,
         } = self;
 
         let patch_struct_fields = fields
@@ -648,6 +659,90 @@ impl Patch {
         #[cfg(not(feature = "op"))]
         let op_impl = quote!();
 
+        // The `into_patch_by_diff` override requires `Self: PartialEq` on
+        // every field (it diffs field-by-field). `#[patch(no_diff)]` opts
+        // out: the trait's default impl runs instead, falling back to a
+        // full `into_patch()` so types with non-`PartialEq` fields (e.g.
+        // `RefCell`, locks, opaque caches) can still derive `Patch`.
+        let into_patch_by_diff_impl = if *no_diff {
+            quote!()
+        } else {
+            quote!(
+                fn into_patch_by_diff(self, previous_struct: Self) -> #name #generics {
+                    #name {
+                        #(
+                            #renamed_field_names: if self.#renamed_field_names != previous_struct.#renamed_field_names {
+                                Some(self.#renamed_field_names.into_patch_by_diff(previous_struct.#renamed_field_names))
+                            }
+                            else {
+                                None
+                            },
+                        )*
+                        #(
+                            #renamed_field_names_by_empty_value: if self.#renamed_field_names_by_empty_value != previous_struct.#renamed_field_names_by_empty_value {
+                                self.#renamed_field_names_by_empty_value.into_patch_by_diff(previous_struct.#renamed_field_names_by_empty_value)
+                            }
+                            else {
+                                #renamed_field_name_empty_values
+                            },
+                        )*
+                        #(
+                            #original_field_names: if self.#original_field_names != previous_struct.#original_field_names {
+                                Some(self.#original_field_names)
+                            }
+                            else {
+                                None
+                            },
+                        )*
+                        #(
+                            #original_field_names_by_empty_value: if self.#original_field_names_by_empty_value != previous_struct.#original_field_names_by_empty_value {
+                                self.#original_field_names_by_empty_value
+                            }
+                            else {
+                                #original_field_name_empty_values
+                            },
+                        )*
+                        #(
+                            #skip_wrap_field_names: if self.#skip_wrap_field_names != previous_struct.#skip_wrap_field_names {
+                                self.#skip_wrap_field_names
+                            }
+                            else {
+                                None
+                            },
+                        )*
+                        #(
+                            #nesting_field_names: self.#nesting_field_names.into_patch_by_diff(previous_struct.#nesting_field_names),
+                        )*
+                        #(
+                            #list_patch_field_names: {
+                                let __id_fn: &dyn Fn(&#list_patch_element_types) -> #list_patch_id_types =
+                                    &(#list_patch_id_fns);
+                                let mut __prev: Vec<#list_patch_element_types> =
+                                    previous_struct.#list_patch_field_names.into_iter().collect();
+                                let mut __ops: Vec<struct_patch::list::ListPatchOp<#list_patch_element_types, #list_patch_patch_types, #list_patch_id_types>> = Vec::new();
+                                for __x in self.#list_patch_field_names.into_iter() {
+                                    let __id_x = __id_fn(&__x);
+                                    if let Some(__idx) = __prev.iter().position(|__p| __id_fn(__p) == __id_x) {
+                                        let __prev_x = __prev.remove(__idx);
+                                        __ops.push(struct_patch::list::ListPatchOp::modify(
+                                            __id_x,
+                                            __x.into_patch_by_diff(__prev_x),
+                                        ));
+                                    } else {
+                                        __ops.push(struct_patch::list::ListPatchOp::append(__x));
+                                    }
+                                }
+                                for __p in __prev.into_iter() {
+                                    __ops.push(struct_patch::list::ListPatchOp::delete(__id_fn(&__p)));
+                                }
+                                __ops
+                            },
+                        )*
+                    }
+                }
+            )
+        };
+
         let patch_impl = quote! {
             #[automatically_derived]
             impl #generics struct_patch::traits::Patch< #name #generics > for #struct_name #generics #where_clause  {
@@ -721,79 +816,7 @@ impl Patch {
                         )*
                     }
                 }
-
-                fn into_patch_by_diff(self, previous_struct: Self) -> #name #generics {
-                    #name {
-                        #(
-                            #renamed_field_names: if self.#renamed_field_names != previous_struct.#renamed_field_names {
-                                Some(self.#renamed_field_names.into_patch_by_diff(previous_struct.#renamed_field_names))
-                            }
-                            else {
-                                None
-                            },
-                        )*
-                        #(
-                            #renamed_field_names_by_empty_value: if self.#renamed_field_names_by_empty_value != previous_struct.#renamed_field_names_by_empty_value {
-                                self.#renamed_field_names_by_empty_value.into_patch_by_diff(previous_struct.#renamed_field_names_by_empty_value)
-                            }
-                            else {
-                                #renamed_field_name_empty_values
-                            },
-                        )*
-                        #(
-                            #original_field_names: if self.#original_field_names != previous_struct.#original_field_names {
-                                Some(self.#original_field_names)
-                            }
-                            else {
-                                None
-                            },
-                        )*
-                        #(
-                            #original_field_names_by_empty_value: if self.#original_field_names_by_empty_value != previous_struct.#original_field_names_by_empty_value {
-                                self.#original_field_names_by_empty_value
-                            }
-                            else {
-                                #original_field_name_empty_values
-                            },
-                        )*
-                        #(
-                            #skip_wrap_field_names: if self.#skip_wrap_field_names != previous_struct.#skip_wrap_field_names {
-                                self.#skip_wrap_field_names
-                            }
-                            else {
-                                None
-                            },
-                        )*
-                        #(
-                            #nesting_field_names: self.#nesting_field_names.into_patch_by_diff(previous_struct.#nesting_field_names),
-                        )*
-                        #(
-                            #list_patch_field_names: {
-                                let __id_fn: &dyn Fn(&#list_patch_element_types) -> #list_patch_id_types =
-                                    &(#list_patch_id_fns);
-                                let mut __prev: Vec<#list_patch_element_types> =
-                                    previous_struct.#list_patch_field_names.into_iter().collect();
-                                let mut __ops: Vec<struct_patch::list::ListPatchOp<#list_patch_element_types, #list_patch_patch_types, #list_patch_id_types>> = Vec::new();
-                                for __x in self.#list_patch_field_names.into_iter() {
-                                    let __id_x = __id_fn(&__x);
-                                    if let Some(__idx) = __prev.iter().position(|__p| __id_fn(__p) == __id_x) {
-                                        let __prev_x = __prev.remove(__idx);
-                                        __ops.push(struct_patch::list::ListPatchOp::modify(
-                                            __id_x,
-                                            __x.into_patch_by_diff(__prev_x),
-                                        ));
-                                    } else {
-                                        __ops.push(struct_patch::list::ListPatchOp::append(__x));
-                                    }
-                                }
-                                for __p in __prev.into_iter() {
-                                    __ops.push(struct_patch::list::ListPatchOp::delete(__id_fn(&__p)));
-                                }
-                                __ops
-                            },
-                        )*
-                    }
-                }
+                #into_patch_by_diff_impl
 
                 fn new_empty_patch() -> #name #generics {
                     #name {
@@ -852,6 +875,7 @@ impl Patch {
         let mut name = None;
         let mut attributes = vec![];
         let mut fields = vec![];
+        let mut no_diff = false;
 
         for attr in attrs {
             if attr.path().to_string().as_str() != PATCH {
@@ -885,6 +909,10 @@ impl Patch {
                         let attribute: TokenStream = content.parse()?;
                         attributes.push(attribute);
                     }
+                    NO_DIFF => {
+                        // #[patch(no_diff)] — see Patch::no_diff field doc.
+                        no_diff = true;
+                    }
                     _ => {
                         return Err(meta.error(format_args!(
                             "unknown patch container attribute `{}`",
@@ -913,6 +941,7 @@ impl Patch {
             generics,
             attributes,
             fields,
+            no_diff,
         })
     }
 }

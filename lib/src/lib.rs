@@ -538,4 +538,39 @@ mod tests {
             }
         );
     }
+
+    /// `#[patch(no_diff)]` lets a struct derive `Patch` even when its fields
+    /// cannot derive `PartialEq` (e.g. they hold `RefCell`, locks, or opaque
+    /// runtime caches). The trait's default `into_patch_by_diff` runs instead,
+    /// which just falls back to a full `into_patch()`.
+    #[test]
+    fn test_no_diff_skips_partial_eq_requirement() {
+        use core::cell::RefCell;
+
+        #[derive(Patch, Default)]
+        #[patch(no_diff)]
+        #[patch(attribute(derive(Debug, Default)))]
+        struct HoldsRefCell {
+            // RefCell<T> does not implement PartialEq, so deriving it on the
+            // struct would fail. With `no_diff`, the macro never emits the
+            // field-by-field diff that would require it.
+            cache: RefCell<u32>,
+            data: u32,
+        }
+
+        let mut item = HoldsRefCell::default();
+        item.data = 7;
+        let patch = HoldsRefCellPatch {
+            cache: None,
+            data: Some(42),
+        };
+        item.apply(patch);
+        assert_eq!(item.data, 42);
+
+        // into_patch_by_diff still works (via the trait default) — it just
+        // falls back to a full patch instead of a diff.
+        let prev = HoldsRefCell::default();
+        let full_patch = item.into_patch_by_diff(prev);
+        assert_eq!(full_patch.data, Some(42));
+    }
 }
