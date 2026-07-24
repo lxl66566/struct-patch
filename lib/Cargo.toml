@@ -14,6 +14,7 @@ rust-version.workspace = true
 [dependencies]
 struct-patch-derive = { version = "=0.12.7", path = "../derive" }
 serde = { version = "1", features = ["derive"], optional = true }
+ts-rs = { version = "12", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0"
@@ -22,6 +23,7 @@ serde_with = "3.9.0"
 toml = "1.1"
 humantime-serde = "1.1.1"
 clap = { version = "4.4.7", features = ["derive"] }
+ts-rs = "12"
 
 [features]
 default = ["status", "op"]
@@ -55,3 +57,7 @@ list = [
     "alloc"
 ]
 serde = ["dep:serde"]
+# Derive `ts_rs::TS` on `ListPatchOp`. Implies `serde` so the generated
+# TypeScript type matches the actual JSON wire shape (internally tagged
+# `{"op": ...}`).
+ts = ["dep:ts-rs", "serde"]

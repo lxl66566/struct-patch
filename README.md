@@ -314,7 +314,8 @@ This crate includes the following optional features:
   - `none_as_default` *(optional)*: `T` needs to implement `Default`. When patching on `None`, it patches on a default instance. Mutually exclusive with `keep_none`.
   - `keep_none` *(optional)*: when patching on `None`, it stays `None`. Mutually exclusive with `none_as_default`.
 - `nesting` *(optional)*: allows a field to use `Patch` derive with the `#[patch(nesting)]` attribute.
-- `list` *(optional)*: allows a `Vec<T>` field to use `Patch` derive with the `#[patch(list_patch(...))]` attribute for fine-grained, id-addressed list patching (see Case 5). Implies `alloc`. With the `serde` feature, each op serializes as `{"op":"...","value":{...}}` (e.g. `{"op":"modify","id":1,"value":{...}}`).
+- `list` *(optional)*: allows a `Vec<T>` field to use `Patch` derive with the `#[patch(list_patch(...))]` attribute for fine-grained, id-addressed list patching (see Case 5). Implies `alloc`. With the `serde` feature, each op serializes as `{"op":"...","value":{...}}` (e.g. `{"op":"modify","id":1,"value":{...}}`). Note the op set has no move/reorder operation: reordering existing elements is not expressible (append/delete only change membership at the ends or by id).
+- `ts` *(optional)*: derives `ts_rs::TS` on `ListPatchOp`, so patch structs with list fields can be exported to TypeScript as a generic discriminated union. Implies `serde` so the generated TypeScript matches the actual wire shape. Requires the `list` feature to be useful.
 - `catalyst` *(optional)*: enables the `Substrate`, `Catalyst`, and `Complex` derive macros for extending a struct with fields from another crate.
 - `unsafe` *(optional)*: uses `ManuallyDrop` + `ptr::read` / `MaybeUninit` + `ptr::write` in the generated `bind`, `decouple`, `__substrate_new`, and `__substrate_unpack` to avoid memory moves. Only meaningful with the `catalyst` feature.
 

@@ -78,6 +78,11 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+// The `ts` feature derives `ts_rs::TS`, whose generated code names `std::`
+// paths. Link `std` while keeping the crate itself `no_std`.
+#[cfg(feature = "ts")]
+extern crate std;
+
 #[cfg(feature = "catalyst")]
 #[doc(hidden)]
 pub use struct_patch_derive::Catalyst;
