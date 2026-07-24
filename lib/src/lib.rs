@@ -97,6 +97,8 @@ pub mod r#box;
 #[cfg(feature = "list")]
 pub mod list;
 pub mod option;
+#[cfg(feature = "serde")]
+pub mod serde_utils;
 pub mod traits;
 pub use traits::*;
 
@@ -577,5 +579,91 @@ mod tests {
         let prev = HoldsRefCell::default();
         let full_patch = item.into_patch_by_diff(prev);
         assert_eq!(full_patch.data, Some(42));
+    }
+
+    /// `#[patch(skip_serializing_none)]` keeps unset (`None`) patch fields
+    /// out of the serialized JSON, so a sparse patch stays sparse on the wire.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_skip_serializing_none() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Patch)]
+        #[patch(skip_serializing_none)]
+        #[patch(attribute(derive(Debug, PartialEq, Serialize, Deserialize)))]
+        struct Item {
+            a: u32,
+            b: Option<String>,
+        }
+
+        let empty: ItemPatch = serde_json::from_str("{}").unwrap();
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
+
+        let sparse: ItemPatch = serde_json::from_str(r#"{ "a": 1 }"#).unwrap();
+        assert_eq!(serde_json::to_string(&sparse).unwrap(), r#"{"a":1}"#);
+
+        // Plain `Option<T>` fields (no `nullable`) still cannot express
+        // "clear": explicit null deserializes to the same `None` as a
+        // missing key.
+        let explicit_null: ItemPatch = serde_json::from_str(r#"{ "b": null }"#).unwrap();
+        assert_eq!(explicit_null, ItemPatch { a: None, b: None });
+    }
+
+    /// `#[patch(nullable)]` makes `Option<T>` fields tri-state over JSON:
+    /// missing = no change, explicit `null` = clear, value = set.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_nullable_serde_roundtrip() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Patch, Debug, PartialEq)]
+        #[patch(skip_serializing_none)]
+        #[patch(attribute(derive(Debug, PartialEq, Serialize, Deserialize)))]
+        struct Item {
+            #[patch(nullable)]
+            maybe: Option<String>,
+            plain: u32,
+        }
+
+        // missing key -> None -> apply is a no-op
+        let patch: ItemPatch = serde_json::from_str("{}").unwrap();
+        let mut item = Item {
+            maybe: Some("keep".into()),
+            plain: 1,
+        };
+        item.apply(patch);
+        assert_eq!(item.maybe, Some("keep".into()));
+
+        // explicit null -> Some(None) -> apply clears the field
+        let patch: ItemPatch = serde_json::from_str(r#"{ "maybe": null }"#).unwrap();
+        let mut item = Item {
+            maybe: Some("clear me".into()),
+            plain: 1,
+        };
+        item.apply(patch);
+        assert_eq!(item.maybe, None);
+
+        // a value -> Some(Some(v)) -> apply sets the field
+        let patch: ItemPatch = serde_json::from_str(r#"{ "maybe": "new" }"#).unwrap();
+        let mut item = Item {
+            maybe: None,
+            plain: 1,
+        };
+        item.apply(patch);
+        assert_eq!(item.maybe, Some("new".into()));
+
+        // `None` (no change) must not serialize as `null` — otherwise a
+        // round-trip would turn "no change" into "clear".
+        let no_change = ItemPatch {
+            maybe: None,
+            plain: Some(1),
+        };
+        assert_eq!(serde_json::to_string(&no_change).unwrap(), r#"{"plain":1}"#);
+        // ...while a real clear does serialize as explicit `null`.
+        let clear = ItemPatch {
+            maybe: Some(None),
+            plain: None,
+        };
+        assert_eq!(serde_json::to_string(&clear).unwrap(), r#"{"maybe":null}"#);
     }
 }

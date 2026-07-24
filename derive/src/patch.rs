@@ -23,6 +23,17 @@ const SKIP_WRAP: &str = "skip_wrap";
 /// `into_patch_by_diff` then kicks in, which just falls back to
 /// `into_patch()`.
 const NO_DIFF: &str = "no_diff";
+/// Container attribute: emit `#[serde(skip_serializing_if = "Option::is_none")]`
+/// on every `Option`-wrapped patch field, so unset fields disappear from the
+/// serialized patch instead of showing up as explicit `null`s. Requires the
+/// patch struct to derive `serde::Serialize`.
+const SKIP_SERIALIZING_NONE: &str = "skip_serializing_none";
+/// Field attribute for `Option<T>` fields: keep the double-`Option` patch
+/// type (`Option<Option<T>>`) and emit the serde plumbing that makes the
+/// three states round-trip through JSON — missing key (`None` = no change),
+/// explicit `null` (`Some(None)` = clear the field) and a value
+/// (`Some(Some(v))` = set). See `struct_patch::serde_utils::deserialize_some`.
+const NULLABLE: &str = "nullable";
 #[cfg(feature = "list")]
 const LIST_PATCH: &str = "list_patch";
 #[cfg(feature = "list")]
@@ -876,6 +887,7 @@ impl Patch {
         let mut attributes = vec![];
         let mut fields = vec![];
         let mut no_diff = false;
+        let mut skip_serializing_none = false;
 
         for attr in attrs {
             if attr.path().to_string().as_str() != PATCH {
@@ -913,6 +925,11 @@ impl Patch {
                         // #[patch(no_diff)] — see Patch::no_diff field doc.
                         no_diff = true;
                     }
+                    SKIP_SERIALIZING_NONE => {
+                        // #[patch(skip_serializing_none)] — see
+                        // Patch::skip_serializing_none field doc.
+                        skip_serializing_none = true;
+                    }
                     _ => {
                         return Err(meta.error(format_args!(
                             "unknown patch container attribute `{}`",
@@ -925,7 +942,7 @@ impl Patch {
         }
 
         for field in original_fields {
-            if let Some(f) = Field::from_ast(field)? {
+            if let Some(f) = Field::from_ast(field, skip_serializing_none)? {
                 fields.push(f);
             }
         }
@@ -1075,16 +1092,24 @@ impl Field {
         }
     }
 
-    /// Parse the patch struct field
+    /// Parse the patch struct field.
+    ///
+    /// `skip_serializing_none` is the container-level
+    /// `#[patch(skip_serializing_none)]` flag: when set, every `Option`-wrapped
+    /// patch field gets `#[serde(skip_serializing_if = "Option::is_none")]`
+    /// (fields with their own serialization semantics — `empty_value`,
+    /// `skip_wrap`, `nullable`, `nesting`, `list_patch` — are excluded).
     pub fn from_ast(
         syn::Field {
             ident, ty, attrs, ..
         }: syn::Field,
+        skip_serializing_none: bool,
     ) -> Result<Option<Field>> {
         let mut attributes = vec![];
         let mut field_type = None;
         let mut skip = false;
         let mut special_attr = SpecialAttr::None;
+        let mut nullable = false;
 
         #[cfg(feature = "op")]
         let mut addable = Addable::Disable;
@@ -1168,6 +1193,11 @@ impl Field {
                                 "`empty_value` and `skip_wrap` cannot be combined on the same field",
                             ));
                         }
+                        if nullable {
+                            return Err(meta.error(
+                                "`empty_value` and `nullable` cannot be combined on the same field",
+                            ));
+                        }
                         if let Some(lit) = crate::get_lit(path, &meta)? {
                             special_attr = SpecialAttr::EmptyValue(lit);
                         } else {
@@ -1182,7 +1212,33 @@ impl Field {
                                 "`skip_wrap` and `empty_value` cannot be combined on the same field",
                             ));
                         }
+                        if nullable {
+                            return Err(meta.error(
+                                "`skip_wrap` and `nullable` cannot be combined on the same field",
+                            ));
+                        }
                         special_attr = SpecialAttr::SkipWrap;
+                    }
+                    NULLABLE => {
+                        // #[patch(nullable)] — double-Option serde round-trip
+                        // for `Option<T>` fields; see the NULLABLE const doc.
+                        if matches!(special_attr, SpecialAttr::EmptyValue(_)) {
+                            return Err(meta.error(
+                                "`nullable` and `empty_value` cannot be combined on the same field",
+                            ));
+                        }
+                        if matches!(special_attr, SpecialAttr::SkipWrap) {
+                            return Err(meta.error(
+                                "`nullable` and `skip_wrap` cannot be combined on the same field",
+                            ));
+                        }
+                        if !is_option_type(&ty) {
+                            return Err(syn::Error::new(
+                                ty.span(),
+                                "`nullable` requires the field type to be `Option<T>`",
+                            ));
+                        }
+                        nullable = true;
                     }
                     #[cfg(feature = "list")]
                     LIST_PATCH => {
@@ -1276,6 +1332,48 @@ impl Field {
             }
         }
 
+        #[cfg(feature = "nesting")]
+        let is_nesting = nesting;
+        #[cfg(not(feature = "nesting"))]
+        let is_nesting = false;
+        #[cfg(feature = "list")]
+        let is_list_patch = list_patch.is_some();
+        #[cfg(not(feature = "list"))]
+        let is_list_patch = false;
+
+        if nullable && is_nesting {
+            return Err(syn::Error::new(
+                ty.span(),
+                "`nullable` and `nesting` cannot be combined on the same field",
+            ));
+        }
+        if nullable && is_list_patch {
+            return Err(syn::Error::new(
+                ty.span(),
+                "`nullable` and `list_patch` cannot be combined on the same field",
+            ));
+        }
+
+        if nullable {
+            // Double-Option serde round-trip: `None` (key missing, via
+            // `default`) = no change, `Some(None)` (explicit `null`, via
+            // `deserialize_some`) = clear, `Some(Some(v))` = set. The skip
+            // rule keeps `None` out of the serialized patch entirely, which
+            // is what stops "no change" from being misread as "clear".
+            attributes.push(quote! {
+                serde(
+                    default,
+                    skip_serializing_if = "Option::is_none",
+                    deserialize_with = "struct_patch::serde_utils::deserialize_some"
+                )
+            });
+        } else if skip_serializing_none && special_attr.is_empty() && !is_nesting && !is_list_patch
+        {
+            attributes.push(quote! {
+                serde(skip_serializing_if = "Option::is_none")
+            });
+        }
+
         Ok(Some(Field {
             ident,
             retyped: field_type.is_some(),
@@ -1300,6 +1398,19 @@ impl ToStr for syn::Path {
     fn to_string(&self) -> String {
         self.to_token_stream().to_string()
     }
+}
+
+/// Whether the field type is syntactically `Option<...>`. Used to validate
+/// `#[patch(nullable)]`.
+fn is_option_type(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .map_or(false, |seg| seg.ident == "Option")
 }
 
 /// Extract the element type `T` from a `Vec<T>` field type. Returns `None`
@@ -1353,6 +1464,7 @@ mod tests {
             patch_struct_name: syn::Ident::new("MyPatch", Span::call_site()),
             generics: syn::Generics::default(),
             attributes: vec![quote! { derive(Debug, PartialEq, Clone, Serialize, Deserialize) }],
+            no_diff: false,
             fields: vec![
                 Field {
                     ident: Some(syn::Ident::new("field1", Span::call_site())),

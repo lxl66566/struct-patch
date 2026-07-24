@@ -48,6 +48,36 @@
 /// // struct ItemPatch {}
 /// ```
 ///
+/// ### `#[patch(skip_serializing_none)]`
+/// Add `#[serde(skip_serializing_if = "Option::is_none")]` to every
+/// `Option`-wrapped patch field, so unset fields disappear from the
+/// serialized patch instead of showing up as explicit `null`s. This is the
+/// built-in equivalent of `serde_with`'s `skip_serializing_none` (shown
+/// above) and needs no extra dependency. Fields with their own
+/// serialization semantics (`empty_value`, `skip_wrap`, `nesting`,
+/// `list_patch`) are unaffected, as are `nullable` fields (which already
+/// carry the attribute). The patch struct must derive `serde::Serialize`.
+/// ```rust
+/// # use struct_patch::Patch;
+/// # use serde::Serialize;
+/// #[derive(Patch)]
+/// #[patch(skip_serializing_none)]
+/// #[patch(attribute(derive(Serialize)))]
+/// struct Item {
+///     field_int: usize,
+/// }
+///
+/// // Generated struct
+/// // #[derive(Serialize)]
+/// // struct ItemPatch {
+/// //     #[serde(skip_serializing_if = "Option::is_none")]
+/// //     field_int: Option<usize>,
+/// // }
+///
+/// let patch = ItemPatch { field_int: None };
+/// assert_eq!(serde_json::to_string(&patch).unwrap(), "{}");
+/// ```
+///
 /// ### `#[patch(name = "...")]`
 /// Use this attribute to change the name of the generated patch struct
 /// ```rust
@@ -108,6 +138,52 @@
 /// item.apply(ItemPatch { tags: Some(vec![]) });
 /// assert_eq!(item.tags, Some(vec![]));
 /// ```
+///
+/// ### `#[patch(nullable)]`
+/// Make an `Option<T>` field tri-state over serde. The patch field keeps the
+/// double-`Option` type (`Option<Option<T>>`), and the derive emits the serde
+/// plumbing that plain `Option<Option<T>>` lacks:
+///
+/// | wire            | patch value     | effect on apply |
+/// | --------------- | --------------- | --------------- |
+/// | key missing     | `None`          | no change       |
+/// | explicit `null` | `Some(None)`    | clear the field |
+/// | a value         | `Some(Some(v))` | set the field   |
+///
+/// Without `nullable`, an explicit `null` deserializes to `None`, so "clear"
+/// is indistinguishable from "no change". Requires the patch struct to
+/// derive `serde::Serialize`/`serde::Deserialize`. Cannot be combined with
+/// `skip_wrap`, `empty_value`, `nesting` or `list_patch`.
+/// ```rust
+/// # use struct_patch::Patch;
+/// # use serde::{Serialize, Deserialize};
+/// #[derive(Default, Patch)]
+/// #[patch(attribute(derive(Serialize, Deserialize)))]
+/// struct Item {
+///     #[patch(nullable)]
+///     nickname: Option<String>,
+/// }
+///
+/// // Generated struct
+/// // struct ItemPatch {
+/// //     #[serde(default, skip_serializing_if = "Option::is_none",
+/// //             deserialize_with = "struct_patch::serde_utils::deserialize_some")]
+/// //     nickname: Option<Option<String>>,
+/// // }
+///
+/// let mut item = Item { nickname: Some("a".into()) };
+///
+/// // Explicit `null` clears the field.
+/// let patch: ItemPatch = serde_json::from_str(r#"{ "nickname": null }"#).unwrap();
+/// item.apply(patch);
+/// assert_eq!(item.nickname, None);
+///
+/// // A missing key is a no-op, and stays out of the serialized patch.
+/// let patch: ItemPatch = serde_json::from_str(r#"{}"#).unwrap();
+/// assert_eq!(serde_json::to_string(&patch).unwrap(), "{}");
+/// item.apply(patch);
+/// assert_eq!(item.nickname, None);
+/// ```
 pub trait Patch<P> {
     /// Apply a patch
     fn apply(&mut self, patch: P);
@@ -117,7 +193,6 @@ pub trait Patch<P> {
 
     /// Returns a patch that when applied turns `previous_struct` into `Self`.
     ///
-    /// The derive generates an override that diffs field-by-field, which
     /// requires `Self: PartialEq`. Types whose fields cannot derive
     /// `PartialEq` (e.g. they contain `RefCell`, locks, or opaque runtime
     /// caches) can opt out via `#[patch(no_diff)]`; the derive then skips the

@@ -254,6 +254,8 @@ Two attribute namespaces are provided for the catalyst feature because we need t
 - `#[patch(name = "...")]`: change the name of the generated patch struct.
 - `#[patch(attribute(...))]`: add attributes to the generated patch struct.
 - `#[patch(attribute(derive(...)))]`: add derives to the generated patch struct.
+- `#[patch(no_diff)]`: skip generating the `into_patch_by_diff` override, so structs whose fields cannot derive `PartialEq` (e.g. containing `RefCell`, locks, or opaque runtime caches) can still derive `Patch`. The trait's default impl runs instead, falling back to a full `into_patch()`.
+- `#[patch(skip_serializing_none)]`: add `#[serde(skip_serializing_if = "Option::is_none")]` to every `Option`-wrapped patch field, so unset fields disappear from the serialized patch instead of showing up as explicit `null`s. Built-in equivalent of `serde_with`'s `skip_serializing_none`; the patch struct must derive `serde::Serialize`.
 - `#[filler(attribute(...))]`: add attributes to the generated filler struct.
 - `#[catalyst(bind = "...")]`: specify the base (substrate) structure. (catalyst feature)
 - `#[catalyst(keep_field_attribute)]`: pass all field attributes from a substrate or catalyst through to the complex, unless an override is explicitly specified for that field. (catalyst feature)
@@ -271,6 +273,7 @@ Two attribute namespaces are provided for the catalyst feature because we need t
 - `#[patch(empty_value = ...)]`: define a value as empty, so the corresponding field of the patch will not be wrapped by `Option`, and the patch is applied when the field differs from the empty value.
 - `#[patch(skip_wrap)]`: keep the field type as-is in the patch struct (no extra `Option` wrapping). Useful when the field is already `Option<...>` (for example `Option<Vec<_>>`) and you do not want a double-`Option` in the patch. With `skip_wrap`, `None` in the patch means "no change" and `Some(v)` sets the field to `Some(v)` (including `Some(vec![])` to clear the vector). Cannot be combined with `empty_value`.
 - `#[patch(nesting)]`: treat the field as a nested patchable struct. The inner struct must also derive `Patch`. Requires the `nesting` feature.
+- `#[patch(nullable)]`: make an `Option<T>` field tri-state over serde: key missing = no change, explicit `null` = clear the field, value = set. The patch field keeps the double-`Option` type and gets the serde attributes needed to round-trip all three states (plain `Option<Option<T>>` maps explicit `null` to `None`, losing the "clear" state). Requires `serde` derives on the patch struct; cannot be combined with `skip_wrap`, `empty_value`, `nesting` or `list_patch`.
 - `#[patch(list_patch(id = |x| ..., id_type = ..., patch_type = ...))]`: patch a `Vec<T>` field element-by-element with `ListPatchOp`s (`Prepend`/`Append`/`Insert`/`Modify`/`Delete`). `id` is a closure computing an element's id, `id_type` is the id type, and `patch_type` optionally overrides the element patch type (defaults to `<T>Patch`). Requires the `list` feature.
 - `#[patch(addable)]`: allow conflicting patches to add their values together with the `+` operator instead of panicking. Requires the `op` feature.
 - `#[patch(add = fn)]`: like `addable`, but use the specified function to combine values. Requires the `op` feature.
